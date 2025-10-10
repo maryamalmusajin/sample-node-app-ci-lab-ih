@@ -13,7 +13,7 @@ permissions:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
-    environment: dev
+    environment: env
 
     steps:
       - name: Checkout code
@@ -33,7 +33,7 @@ jobs:
 
       - name: Build the application (optional)
         run: |
-          npm run build 2>/dev/null || echo "No build script found, skipping build step"
+          npm run build 2>/env/null || echo "No build script found, skipping build step"
 
       # Skip sonarqube
       - name: Run unit tests with coverage and JUnit reports
@@ -90,7 +90,7 @@ jobs:
           [ -f README.md ] && cp README.md "$STAGING/" || true
           [ -f Dockerfile ] && cp Dockerfile "$STAGING/" || echo "No Dockerfile found"
 
-          (cd "$STAGING" && npm pkg delete devDependencies || true)
+          (cd "$STAGING" && npm pkg delete envDependencies || true)
 
           TS="$(date +%Y%m%d-%H%M%S)"
           SHORT_SHA="${GITHUB_SHA::7}"
@@ -139,14 +139,14 @@ jobs:
               --name "$AZ_STORAGE_CONTAINER" \
               --account-name "$AZ_STORAGE_ACCOUNT" \
               --account-key "$AZ_STORAGE_KEY" \
-              --only-show-errors 1>/dev/null
+              --only-show-errors 1>/env/null
 
             # Quick preflight
             az storage blob list \
               --account-name "$AZ_STORAGE_ACCOUNT" \
               --account-key "$AZ_STORAGE_KEY" \
               --container-name "$AZ_STORAGE_CONTAINER" \
-              --num-results 1 --only-show-errors 1>/dev/null
+              --num-results 1 --only-show-errors 1>/env/null
 
             echo "Uploading $ZIP_NAME ..."
             az storage blob upload \
@@ -185,20 +185,20 @@ jobs:
           PACKAGE_URL="$1"
 
           # Install Node.js if not present
-          if ! command -v node >/dev/null 2>&1; then
+          if ! command -v node >/env/null 2>&1; then
             echo "Installing Node.js..."
             curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
             sudo apt-get install -y nodejs
           fi
 
           # Install PM2 if not present
-          if ! command -v pm2 >/dev/null 2>&1; then
+          if ! command -v pm2 >/env/null 2>&1; then
             echo "Installing PM2..."
             sudo npm install -g pm2
           fi
 
           # Install unzip if not present
-          if ! command -v unzip >/dev/null 2>&1; then
+          if ! command -v unzip >/env/null 2>&1; then
             echo "Installing unzip..."
             sudo apt-get update && sudo apt-get install -y unzip
           fi
@@ -218,8 +218,8 @@ jobs:
           # Find the actual app directory (handle deployment-package folder)
           if [ -d "$RELEASE_DIR/deployment-package" ]; then
             echo "Flattening package structure..."
-            sudo mv "$RELEASE_DIR/deployment-package"/* "$RELEASE_DIR/" 2>/dev/null || true
-            sudo rmdir "$RELEASE_DIR/deployment-package" 2>/dev/null || true
+            sudo mv "$RELEASE_DIR/deployment-package"/* "$RELEASE_DIR/" 2>/env/null || true
+            sudo rmdir "$RELEASE_DIR/deployment-package" 2>/env/null || true
           fi
 
           # Set permissions
@@ -228,7 +228,7 @@ jobs:
           # Install dependencies
           if [ -f "$RELEASE_DIR/package.json" ]; then
             echo "Installing dependencies..."
-            sudo -u "$APP_USER" bash -c "cd '$RELEASE_DIR' && npm ci --omit=dev"
+            sudo -u "$APP_USER" bash -c "cd '$RELEASE_DIR' && npm ci --omit=env"
           fi
 
           # Deploy - create symlink
@@ -247,8 +247,8 @@ jobs:
 
           # Stop any existing PM2 process
           echo "Stopping any existing PM2 processes..."
-          sudo -u "$APP_USER" pm2 stop "$APP_NAME" 2>/dev/null || true
-          sudo -u "$APP_USER" pm2 delete "$APP_NAME" 2>/dev/null || true
+          sudo -u "$APP_USER" pm2 stop "$APP_NAME" 2>/env/null || true
+          sudo -u "$APP_USER" pm2 delete "$APP_NAME" 2>/env/null || true
 
           # Start with PM2 (non-blocking)
           echo "Starting application with PM2..."
