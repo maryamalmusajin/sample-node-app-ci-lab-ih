@@ -264,28 +264,24 @@ jobs:
         if: ${{ success() }}
         uses: azure/cli@v2.1.0
         env:
-          ZIP_NAME: deployment-package-15c1d96-20251011-113536.zip
-          PACKAGE_SAS_URL: ***
-          AZURE_RESOURCE_GROUP: ***
-          AZURE_VM_NAME: ***
+          AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
+          AZURE_VM_NAME: ${{ secrets.AZURE_VM_NAME }}
+          PACKAGE_SAS_URL: ${{ env.PACKAGE_SAS_URL }}
         with:
           inlineScript: |
-            set -e
+            # Upload the deployment script to VM
             az vm run-command invoke \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_VM_NAME" \
               --command-id RunShellScript \
               --scripts "cat > /tmp/deploy.sh << 'DEPLOY_SCRIPT_EOF'
-              #!/bin/bash
-              set -x
-              echo 'Started at $(date)' >> /tmp/deploy.log
-              $(cat deploy.sh)
-              echo 'Ended at $(date)' >> /tmp/deploy.log
-              DEPLOY_SCRIPT_EOF
-              chmod +x /tmp/deploy.sh"
+            $(cat deploy.sh)
+            DEPLOY_SCRIPT_EOF
+            chmod +x /tmp/deploy.sh"
+
+            # Execute the deployment script
             az vm run-command invoke \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_VM_NAME" \
               --command-id RunShellScript \
-              --scripts "timeout 1200 sudo /tmp/deploy.sh '$PACKAGE_SAS_URL' || echo 'Timed out at $(date)' >> /tmp/deploy.log"
-          azcliversion: agentazcliversion
+              --scripts "sudo /tmp/deploy.sh '$PACKAGE_SAS_URL'"
