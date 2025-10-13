@@ -1,0 +1,76 @@
+name: Deploy Node.js App to Azure VM
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests (if present)
+        run: npm test --if-present
+
+      - name: Package app
+        run: zip -r app.zip .
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Upload ZIP to Azure Blob
+        run: |
+          az storage blob upload \
+            --account-name ${{ secrets.AZ_STORAGE_ACCOUNT }} \
+            --account-key ${{ secrets.AZ_STORAGE_KEY }} \
+            --container-name ${{ secrets.AZ_STORAGE_CONTAINER }} \
+            --file app.zip --name app-${{ github.sha }}.zip --overwrite
+          SAS=$(az storage blob generate-sas \
+            --account-name ${{ secrets.AZ_STORAGE_ACCOUNT }} \
+            --account-key ${{ secrets.AZ_STORAGE_KEY }} \
+            --container-name ${{ secrets.AZ_STORAGE_CONTAINER }} \
+            --name app-${{ github.sha }}.zip \
+            --permissions r --expiry $(date -u -d "1 hour" '+%Y-%m-%dT%H:%MZ') -o tsv)
+          echo "PACKAGE_SAS_URL=https://${{ secrets.AZ_STORAGE_ACCOUNT }}.blob.core.windows.net/${{ secrets.AZ_STORAGE_CONTAINER }}/app-${{ github.sha }}.zip?$SAS" >> $GITHUB_ENV
+      - name: Deploy on VM
+        run: |
+          cat <<'SCRIPT' > deploy.sh
+          #!/bin/bash
+          set -e
+          sudo apt-get update -y
+          sudo apt-get install -y curl unzip
+          curl -o /tmp/app.zip "$1"
+          sudo mkdir -p /opt/myapp/releases
+          cd /opt/myapp/releases
+          sudo unzip -o /tmp/app.zip -d $(date +%s)
+          cd $(ls -td */ | head -1)
+          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo -E bash -
+          sudo apt-get install -y nodejs
+          sudo npm install -g pm2
+          sudo npm ci --omit=dev
+          sudo pm2 start npm --name "myapp" -- start
+          sudo pm2 save
+          SCRIPT
+          az vm run-command invoke \
+            -g ${{ secrets.AZURE_RESOURCE_GROUP }} \
+            -n ${{ secrets.AZURE_VM_NAME }} \
+            --command-id RunShellScript \
+            --scripts "bash /tmp/deploy.sh '${{ env.PACKAGE_SAS_URL }}'"
