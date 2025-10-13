@@ -56,7 +56,7 @@ jobs:
           registryPassword: ${{ secrets.DOCKERHUB_TOKEN }}
 
           # Azure targets
-          resourceGroup: container-labs-rg-maryam
+          resourceGroup: container-labs-rg
           containerAppName: frontendapp
 
           # Image tag = commit SHA for traceability
