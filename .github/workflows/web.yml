@@ -15,7 +15,7 @@ env:
  APP_PORT: 3000
  IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/frontendapp-node
  AZURE_RESOURCE_GROUP: web-labs-rg-maryam
- AZURE_WEBAPP_NAME: frontendapp-web-maryam
+ AZURE_WEBAPP_NAME: frontendapp-web
 
 jobs:
  build-test-and-deploy:
