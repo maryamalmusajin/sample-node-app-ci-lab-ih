@@ -1,5 +1,4 @@
-name: Lab 3 (Online) or Lab 1 (Onsite)
-
+name: vm
 on:
   workflow_dispatch:
 
