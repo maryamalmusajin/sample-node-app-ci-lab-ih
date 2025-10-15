@@ -1,4 +1,4 @@
-name: vm
+name: new vm
 on:
   workflow_dispatch:
 
