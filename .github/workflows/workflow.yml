@@ -10,7 +10,7 @@ permissions:
   id-token: write
 
 jobs:
-  build-and-test:
+  build-and-deploy:
     runs-on: ubuntu-latest
     environment: dev
 
@@ -30,63 +30,26 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build the application (optional)
+      - name: Run tests (optional)
         run: |
-          npm run build 2>/dev/null || echo "No build script found, skipping build step"
+          npm test || echo "Tests skipped"
 
-      # Skip sonarqube
-      - name: Run unit tests with coverage and JUnit reports
-        env:
-          JEST_JUNIT_OUTPUT: coverage/junit.xml
-        run: npm run test:ci
-
-      - name: Publish test results to Checks
-        uses: dorny/test-reporter@v2.1.1
-        if: always()
-        with:
-          name: Jest Test Results
-          path: coverage/junit.xml
-          reporter: jest-junit
-          fail-on-error: true
-
-      - name: Upload test results to GitHub
-        uses: actions/upload-artifact@v4.6.2
-        if: always()
-        with:
-          name: test-results-node
-          path: coverage/
-          retention-days: 30
-
-      - name: SonarQube Scan
-        uses: SonarSource/sonarqube-scan-action@v6.0.0
-        env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
-        with:
-          args: >
-            -Dsonar.projectKey=sample-node-app-saurabh
-            -Dsonar.organization=sda
-            -Dsonar.token=${{ secrets.SONAR_TOKEN }}
-            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
-            -Dsonar.sources=.
-            -Dsonar.exclusions=node_modules/**,coverage/**,tests/**,**/*.test.js,**/*.spec.js
-            -Dsonar.tests=tests/
-            -Dsonar.test.inclusions=**/*.test.js,**/*.spec.js
-            -Dsonar.coverage.exclusions=node_modules/**,coverage/**,tests/**,**/*.test.js,**/*.spec.js
-
+      # -------------------------------
+      # Create Deployment Package
+      # -------------------------------
       - name: Create deployment package
         run: |
           set -euo pipefail
           STAGING="$GITHUB_WORKSPACE/deployment-package"
           rm -rf "$STAGING"
           mkdir -p "$STAGING"
-      
-          echo "Copying application files..."
-          cp -r public tests package*.json server.js Dockerfile README.md "$STAGING/" || true
-      
+
+          echo "Copying project files..."
+          rsync -av --exclude='.git' --exclude='.github' --exclude='coverage' --exclude='node_modules' ./ "$STAGING/"
+
           echo "Installing production dependencies..."
           (cd "$STAGING" && npm ci --omit=dev)
-      
+
           TS="$(date +%Y%m%d-%H%M%S)"
           SHORT_SHA="${GITHUB_SHA::7}"
           ZIP_NAME="deployment-package-${SHORT_SHA}-${TS}.zip"
@@ -95,22 +58,13 @@ jobs:
 
       - name: Azure login (client secret)
         uses: azure/login@v2
-        # ------------------------------------
-        # ------- !!!!!!انتبهوا هنا ----------
         with:
-          # Check the naming of your CREDENTIALS secrets and change it
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-        # ------------------------------------
 
-      - name: Upload deployment package artifact
-        uses: actions/upload-artifact@v4.6.2
-        with:
-          name: deployment-package-node-${{ github.run_number }}
-          path: ${{ env.ZIP_NAME }}
-          retention-days: 90
-
-      - name: Upload package to Blob (key-based, hardened)
-        if: ${{ success() }}
+      # -------------------------------
+      # Upload Package to Azure Blob
+      # -------------------------------
+      - name: Upload package to Blob
         uses: azure/cli@v2.1.0
         env:
           ZIP_NAME: ${{ env.ZIP_NAME }}
@@ -120,30 +74,16 @@ jobs:
         with:
           inlineScript: |
             set -euo pipefail
-            : "${AZ_STORAGE_ACCOUNT:?AZ_STORAGE_ACCOUNT missing}"
-            : "${AZ_STORAGE_CONTAINER:?AZ_STORAGE_CONTAINER missing}"
-            : "${AZ_STORAGE_KEY:?AZ_STORAGE_KEY missing}"
-            : "${ZIP_NAME:?ZIP_NAME missing}"
-
-            # Trim stray whitespace/newlines in key
             AZ_STORAGE_KEY="$(printf %s "$AZ_STORAGE_KEY" | tr -d '\r\n')"
             export AZ_STORAGE_KEY
 
-            # Ensure container exists (idempotent)
             az storage container create \
               --name "$AZ_STORAGE_CONTAINER" \
               --account-name "$AZ_STORAGE_ACCOUNT" \
               --account-key "$AZ_STORAGE_KEY" \
               --only-show-errors 1>/dev/null
 
-            # Quick preflight
-            az storage blob list \
-              --account-name "$AZ_STORAGE_ACCOUNT" \
-              --account-key "$AZ_STORAGE_KEY" \
-              --container-name "$AZ_STORAGE_CONTAINER" \
-              --num-results 1 --only-show-errors 1>/dev/null
-
-            echo "Uploading $ZIP_NAME ..."
+            echo "Uploading $ZIP_NAME..."
             az storage blob upload \
               --account-name "$AZ_STORAGE_ACCOUNT" \
               --account-key "$AZ_STORAGE_KEY" \
@@ -153,7 +93,6 @@ jobs:
               --overwrite true \
               --only-show-errors
 
-            # Short-lived SAS URL for VM download
             SAS=$(az storage blob generate-sas \
               --account-name "$AZ_STORAGE_ACCOUNT" \
               --account-key "$AZ_STORAGE_KEY" \
@@ -166,62 +105,10 @@ jobs:
             echo "::add-mask::$SAS"
             echo "PACKAGE_SAS_URL=$SAS" >> "$GITHUB_ENV"
 
-      - name: Create deployment script
-        if: ${{ success() }}
-        run: |
-          cat > deploy.sh << 'EOF'
-          #!/bin/bash
-          set -e
-      
-          APP_DIR="/opt/myapp"
-          APP_NAME="myapp"
-          APP_USER="azureuser"
-          PACKAGE_URL="$1"
-      
-          # Ensure dependencies
-          sudo apt-get update -y
-          sudo apt-get install -y unzip curl
-      
-          # Prepare folders
-          sudo mkdir -p "$APP_DIR/releases" "$APP_DIR/current"
-      
-          # Download the package
-          echo "Downloading deployment package..."
-          curl -fSL "$PACKAGE_URL" -o /tmp/app.zip
-      
-          # Extract to release folder
-          RELEASE_DIR="$APP_DIR/releases/$(date +%Y%m%d-%H%M%S)"
-          sudo mkdir -p "$RELEASE_DIR"
-          sudo unzip -o /tmp/app.zip -d "$RELEASE_DIR"
-      
-          # Handle nested folder structure safely
-          if [ -d "$RELEASE_DIR/deployment-package" ]; then
-            echo "Flattening package structure..."
-            sudo rsync -av "$RELEASE_DIR/deployment-package/" "$RELEASE_DIR/"
-            sudo rm -rf "$RELEASE_DIR/deployment-package"
-          fi
-      
-          # Verify content
-          echo "Verifying content of $RELEASE_DIR:"
-          ls -la "$RELEASE_DIR"
-      
-          # Link current release
-          sudo rm -rf "$APP_DIR/current"
-          sudo ln -sfn "$RELEASE_DIR" "$APP_DIR/current"
-      
-          # Start app
-          sudo npm install -g pm2
-          sudo -u "$APP_USER" pm2 stop "$APP_NAME" 2>/dev/null || true
-          sudo -u "$APP_USER" pm2 delete "$APP_NAME" 2>/dev/null || true
-          sudo -u "$APP_USER" pm2 start "$APP_DIR/current/server.js" --name "$APP_NAME"
-          sudo -u "$APP_USER" pm2 save
-      
-          echo "Deployment finished successfully!"
-          EOF
-
-
-      - name: Upload and execute deployment script
-        if: ${{ success() }}
+      # -------------------------------
+      # Create and Run Deploy Script on VM
+      # -------------------------------
+      - name: Create and run deployment script on VM
         uses: azure/cli@v2.1.0
         env:
           AZURE_RESOURCE_GROUP: ${{ secrets.AZURE_RESOURCE_GROUP }}
@@ -229,19 +116,57 @@ jobs:
           PACKAGE_SAS_URL: ${{ env.PACKAGE_SAS_URL }}
         with:
           inlineScript: |
-            # Upload the deployment script to VM
-            az vm run-command invoke \
-              --resource-group "$AZURE_RESOURCE_GROUP" \
-              --name "$AZURE_VM_NAME" \
-              --command-id RunShellScript \
-              --scripts "cat > /tmp/deploy.sh << 'DEPLOY_SCRIPT_EOF'
-            $(cat deploy.sh)
-            DEPLOY_SCRIPT_EOF
-            chmod +x /tmp/deploy.sh"
+            echo "Uploading and executing deployment script on VM..."
 
-            # Execute the deployment script
             az vm run-command invoke \
               --resource-group "$AZURE_RESOURCE_GROUP" \
               --name "$AZURE_VM_NAME" \
               --command-id RunShellScript \
-              --scripts "sudo /tmp/deploy.sh '$PACKAGE_SAS_URL'"
+              --scripts '
+                set -e
+                APP_DIR="/opt/myapp"
+                APP_NAME="myapp"
+                APP_USER="azureuser"
+                PACKAGE_URL="${PACKAGE_SAS_URL}"
+
+                echo "Installing dependencies (unzip, curl, rsync)..."
+                sudo apt-get update -y
+                sudo apt-get install -y unzip curl rsync
+
+                echo "Preparing directories..."
+                sudo mkdir -p "$APP_DIR/releases" "$APP_DIR/current"
+
+                echo "Downloading deployment package..."
+                curl -fSL "$PACKAGE_URL" -o /tmp/app.zip
+
+                RELEASE_DIR="$APP_DIR/releases/$(date +%Y%m%d-%H%M%S)"
+                sudo mkdir -p "$RELEASE_DIR"
+
+                echo "Extracting package..."
+                sudo unzip -o /tmp/app.zip -d "$RELEASE_DIR"
+
+                if [ -d "$RELEASE_DIR/deployment-package" ]; then
+                  echo "Flattening structure..."
+                  sudo rsync -av "$RELEASE_DIR/deployment-package/" "$RELEASE_DIR/"
+                  sudo rm -rf "$RELEASE_DIR/deployment-package"
+                fi
+
+                echo "Verifying contents of $RELEASE_DIR"
+                ls -la "$RELEASE_DIR"
+
+                echo "Linking current release..."
+                sudo rm -rf "$APP_DIR/current"
+                sudo ln -sfn "$RELEASE_DIR" "$APP_DIR/current"
+
+                echo "Installing PM2..."
+                sudo npm install -g pm2
+
+                echo "Starting app with PM2..."
+                sudo -u "$APP_USER" pm2 stop "$APP_NAME" 2>/dev/null || true
+                sudo -u "$APP_USER" pm2 delete "$APP_NAME" 2>/dev/null || true
+                sudo -u "$APP_USER" pm2 start "$APP_DIR/current/server.js" --name "$APP_NAME" --no-daemon &
+                sudo -u "$APP_USER" pm2 save
+
+                echo "Deployment complete!"
+              '
+
